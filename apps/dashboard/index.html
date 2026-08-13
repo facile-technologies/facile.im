@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" href="/favicon.ico" sizes="any" />
+    <link rel="icon" type="image/png" href="/icon.png" />
+    <link rel="preload" as="image" href="/brand/logo-full-dark.png">
+    <link rel="preload" as="image" href="/brand/logo-full-light.png">
+          <link
+            href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&family=Roboto:wght@400;700&family=Poppins:wght@400;600&display=swap"
+            rel="stylesheet"
+          />
+    
+
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Facile — Your all-in-one link, on a tap</title>
+    <meta
+      name="description"
+      content="Facile is the NFC smart card that turns one tap into your entire profile. Share your links, socials, and contact in a second — no app required."
+    />
+    <meta property="og:title" content="Facile — Your all-in-one link, on a tap" />
+    <meta
+      property="og:description"
+      content="The NFC smart card that turns one tap into your entire profile."
+    />
+    <meta property="og:type" content="website" />
+    <script>
+  const theme = localStorage.getItem("theme") || "light";
+  if (theme === "dark") {
+    document.documentElement.classList.add("dark");
+  }
+</script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+
+
+  </body>
+</html>

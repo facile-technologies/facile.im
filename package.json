@@ -1,0 +1,19 @@
+{
+  "name": "facile",
+  "private": true,
+  "description": "Facile monorepo root. pnpm workspace + Turborepo over the three frontends (landing/dashboard/admin); apps/api stays on npm and is intentionally out of the workspace.",
+  "packageManager": "pnpm@10.17.1",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "concurrently -n web,api -c cyan,magenta \"turbo run dev\" \"npm --prefix apps/api run dev\"",
+    "build": "turbo run build",
+    "lint": "turbo run lint",
+    "install:all": "pnpm install && npm --prefix apps/api install"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "turbo": "^2.5.8"
+  }
+}

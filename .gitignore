@@ -1,0 +1,43 @@
+# ---- dependencies ----
+node_modules/
+.pnp
+.pnp.js
+
+# ---- build outputs ----
+dist/
+.next/
+out/
+build/
+*.tsbuildinfo
+
+# ---- turborepo ----
+.turbo/
+
+# ---- secrets / env (NEVER commit) ----
+.env
+.env.*
+!.env.example
+
+# ---- backend runtime data (user uploads, exports) ----
+apps/api/public/uploads/
+apps/api/public/exports/
+
+# ---- logs ----
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+
+# ---- claude code ----
+.claude/
+
+# ---- OS / editor ----
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# ---- Documentation ----
+docs/
+docs2/
+CLAUDE.md

@@ -1,0 +1,101 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main, staging]
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # ---- resolve environment from branch ----
+      - name: Resolve environment
+        run: |
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            echo "BASE_DIR=/var/www/facile"          >> "$GITHUB_ENV"
+            echo "PM2_APP=facile-api-prod"            >> "$GITHUB_ENV"
+            echo "HOST_URL=https://facile.im"         >> "$GITHUB_ENV"
+            echo "VITE_API_BASE_URL=https://facile.im/api" >> "$GITHUB_ENV"
+            echo "VITE_APP_URL=https://facile.im/app" >> "$GITHUB_ENV"
+          else
+            echo "BASE_DIR=/var/www/facile-staging"           >> "$GITHUB_ENV"
+            echo "PM2_APP=facile-api-staging"                  >> "$GITHUB_ENV"
+            echo "HOST_URL=https://staging.facile.im"          >> "$GITHUB_ENV"
+            echo "VITE_API_BASE_URL=https://staging.facile.im/api" >> "$GITHUB_ENV"
+            echo "VITE_APP_URL=https://staging.facile.im/app"  >> "$GITHUB_ENV"
+          fi
+
+      # ---- toolchain ----
+      # pnpm version is pinned by the root package.json "packageManager" field;
+      # do NOT also set `version` here (pnpm/action-setup errors on both).
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # ---- build all frontends (single pnpm workspace + turbo) ----
+      # One root install + one turbo build. Outputs are unchanged:
+      # landing -> apps/landing/out/ ; dashboard/admin -> apps/*/dist/.
+      # VITE_* are declared in turbo.json's build `env`, so they're part of the
+      # cache key (a staging build can never be reused for prod, and vice versa).
+      # api is NOT in the workspace; it is built on the server (see below).
+      - name: Build frontends
+        env:
+          VITE_API_BASE_URL: ${{ env.VITE_API_BASE_URL }}
+          VITE_APP_URL: ${{ env.VITE_APP_URL }}
+        run: pnpm install --frozen-lockfile && pnpm turbo run build
+
+      # ---- ssh setup ----
+      - name: Start SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+      - name: Known hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -p "${{ secrets.SSH_PORT || 22 }}" -H "${{ secrets.SSH_HOST }}" >> ~/.ssh/known_hosts
+
+      # ---- deploy static builds ----
+      - name: Rsync landing
+        run: rsync -az --delete -e "ssh -p ${{ secrets.SSH_PORT || 22 }}" apps/landing/out/ "${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:${BASE_DIR}/landing/"
+      - name: Rsync dashboard
+        run: rsync -az --delete -e "ssh -p ${{ secrets.SSH_PORT || 22 }}" apps/dashboard/dist/ "${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:${BASE_DIR}/facile-web/dist/"
+      - name: Rsync admin
+        run: rsync -az --delete -e "ssh -p ${{ secrets.SSH_PORT || 22 }}" apps/admin/dist/ "${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:${BASE_DIR}/facile-admin/dist/"
+
+      # ---- deploy backend (source only; deps + reload on the server) ----
+      - name: Rsync api source
+        run: |
+          rsync -az --delete \
+            --exclude '.env' --exclude '.env.*' \
+            --exclude 'node_modules' \
+            --exclude 'public/uploads' --exclude 'public/exports' \
+            -e "ssh -p ${{ secrets.SSH_PORT || 22 }}" \
+            apps/api/ "${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:${BASE_DIR}/facile-backend/"
+      - name: Release backend (deps + backup + migrate + reload)
+        run: |
+          ssh -p "${{ secrets.SSH_PORT || 22 }}" "${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}" \
+            "cd ${BASE_DIR}/facile-backend && bash deploy-release.sh ${PM2_APP}"
+
+      # ---- verify ----
+      # Retry: pm2 reload cycles the process, so a single curl can race the
+      # restart window and get a transient 502. Poll instead of one-shot.
+      - name: Health check
+        run: |
+          for i in $(seq 1 6); do
+            if curl -fsS -m 10 "${HOST_URL}/api/health"; then
+              echo ""
+              echo "Deploy OK: ${HOST_URL} (attempt $i)"
+              exit 0
+            fi
+            echo "health check attempt $i/6 failed; retrying in 5s..."
+            sleep 5
+          done
+          echo "Health check failed after 6 attempts: ${HOST_URL}/api/health"
+          exit 1

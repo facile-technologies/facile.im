@@ -1,0 +1,14 @@
+{
+  "name": "@facile/tailwind-preset",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Shared Facile design tokens (Tailwind v4 theme) — single source of truth for colors, typography, and radius across landing and dashboard.",
+  "type": "module",
+  "exports": {
+    ".": "./theme.css",
+    "./theme.css": "./theme.css"
+  },
+  "files": [
+    "theme.css"
+  ]
+}

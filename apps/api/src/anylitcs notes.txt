@@ -1,0 +1,141 @@
+const trackProfileView = async (userId, userProfileId) => {
+  const now = new Date();
+
+  // UTC values — always consistent regardless of your server's timezone
+  const utcDate = now.toISOString().split("T")[0];          // "2026-04-08"
+  const utcHourStart = new Date(
+    Date.UTC(
+      now.getUTCFullYear(),
+      now.getUTCMonth(),
+      now.getUTCDate(),
+      now.getUTCHours(),
+      0, 0, 0   // zero out minutes/seconds
+    )
+  ); // "2026-04-08T09:00:00.000Z"
+
+  // 1. Hourly upsert
+  const [hourlyRow] = await UserAnalyticsHourly.findOrCreate({
+    where: {
+      user_profile_id: userProfileId,
+      analytics_hour_utc: utcHourStart,
+    },
+    defaults: { user_id: userId, views_count: 0, clicks_count: 0 },
+  });
+  await hourlyRow.increment("views_count");
+
+  // 2. Daily upsert
+  const [dailyRow] = await UserAnalytics.findOrCreate({
+    where: {
+      user_profile_id: userProfileId,
+      analytics_date: utcDate,
+    },
+    defaults: { user_id: userId, views_count: 0, clicks_count: 0 },
+  });
+  await dailyRow.increment("views_count");
+
+  // 3. Totals
+  await UserAnalyticsTotal.increment("total_views", {
+    where: { user_profile_id: userProfileId },
+  });
+};
+
+
+
+
+=================
+
+
+router.get("/live/:userProfileId", async (req, res) => {
+  const { userProfileId } = req.params;
+  const now = new Date();
+
+  // Start of today in UTC
+  const startOfDayUTC = new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())
+  );
+  // End of today in UTC
+  const endOfDayUTC = new Date(startOfDayUTC.getTime() + 24 * 60 * 60 * 1000);
+
+  const hourlyData = await UserAnalyticsHourly.findAll({
+    where: {
+      user_profile_id: userProfileId,
+      analytics_hour_utc: { [Op.gte]: startOfDayUTC, [Op.lt]: endOfDayUTC },
+    },
+    attributes: ["analytics_hour_utc", "views_count", "clicks_count"],
+    order: [["analytics_hour_utc", "ASC"]],
+  });
+
+  // Send raw UTC timestamps — frontend converts to user's local time
+  const data = hourlyData.map((row) => ({
+    timestamp: row.analytics_hour_utc,   // "2026-04-08T09:00:00.000Z"
+    views: row.views_count,
+    clicks: row.clicks_count,
+  }));
+
+  res.json({ data });
+});
+
+
+==================================
+
+Trafic source
+
+
+// User clicks Instagram bio link: https://yourdomain.com/profile?utm_source=instagram
+// Frontend loads this component
+
+const UserProfile = () => {
+  const [userData, setUserData] = useState(null);
+  
+  useEffect(() => {
+    // Get the source information
+    const getTrafficSource = () => {
+      // Method 1: Check URL parameters first
+      const urlParams = new URLSearchParams(window.location.search);
+      const utmSource = urlParams.get('utm_source');
+      const utmMedium = urlParams.get('utm_medium');
+      
+      // Method 2: Check document.referrer
+      const referrer = document.referrer;
+      let referrerSource = 'direct';
+      
+      if (referrer) {
+        if (referrer.includes('instagram.com')) referrerSource = 'instagram';
+        else if (referrer.includes('facebook.com')) referrerSource = 'facebook';
+        else if (referrer.includes('twitter.com')) referrerSource = 'twitter';
+        else if (referrer.includes('linkedin.com')) referrerSource = 'linkedin';
+        else referrerSource = referrer;
+      }
+      
+      // Priority: UTM parameters > referrer > direct
+      return {
+        source: utmSource || referrerSource || 'direct',
+        medium: utmMedium || null,
+        full_referrer: referrer || null,
+        landing_url: window.location.href
+      };
+    };
+    
+    const sourceInfo = getTrafficSource();
+    console.log('User came from:', sourceInfo);
+    
+    // Call your API and send source info
+    const fetchUserData = async () => {
+      const response = await fetch('/api/user/profile', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId: 'some-id',
+          trafficSource: sourceInfo  // Send source to backend
+        })
+      });
+      
+      const data = await response.json();
+      setUserData(data);
+    };
+    
+    fetchUserData();
+  }, []);
+  
+  return <div>{/* Your profile UI */}</div>;
+};

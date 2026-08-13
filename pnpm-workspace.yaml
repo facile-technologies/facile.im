@@ -1,0 +1,17 @@
+packages:
+  - apps/landing
+  - apps/dashboard
+  - apps/admin
+  - packages/*
+
+# esbuild + fsevents ship build scripts (transitive via Vite); pnpm 10 blocks
+# dependency build scripts by default, so allow just these two.
+onlyBuiltDependencies:
+  - esbuild
+  - fsevents
+
+# Moved from apps/landing/pnpm-workspace.yaml — landing deliberately does NOT
+# build these (nested workspace roots are unsupported, so they live here now).
+ignoredBuiltDependencies:
+  - sharp
+  - unrs-resolver
