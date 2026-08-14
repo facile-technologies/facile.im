@@ -6,6 +6,7 @@ import getDirname from "./utils/getDirName.js";
 import connectDB, { sequelize } from "./database/connectDB.js";
 import errorHandler from "./middlewares/errors/errorHandler.js";
 import cors from "cors";
+import cookieParser from "cookie-parser";
 import path from "path";
 import router from "./routes/v1/index.js";
 import { BusinessCustomLinkCustomization, BusinessProfileLinkCustomization, initAssociations, PetProfile, ProfileContactSubmission, ProfileCustomLink, ProfileLink, ProfileSaveContact, QrCustomization, User, UserPlan } from "./models/Association.js";
@@ -59,6 +60,10 @@ import UserAnalyticsHourly from "./models/UserAnalyticsHourly.model.js";
 import PlatformLinkAnalytics from "./models/PlatformLinkAnalytics.model.js";
 import CustomLinkAnalytics from "./models/CustomLinkAnalytics.model.js";
 
+// Behind nginx — trust the first proxy hop so req.ip is the real client IP
+// (required for the rate limiters to key off the actual client, not the proxy).
+app.set("trust proxy", 1);
+
 // app.use(express.json());
 app.use(express.json({
   limit: "50mb",
@@ -70,6 +75,9 @@ app.use(express.json({
 }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
 // app.use(express.urlencoded({ extended: true }));
+// Parse cookies so we can read the httpOnly `refresh_token` cookie on /refresh
+// and /logout. Must run before the routes that read req.cookies.
+app.use(cookieParser());
 app.use(morgan("tiny"));
 app.disable("x-powered-by");
 

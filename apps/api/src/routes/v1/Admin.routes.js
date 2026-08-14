@@ -3,10 +3,12 @@ const router = express.Router();
 
 import auth from "../../middlewares/auth.js";
 import isAdmin from "../../middlewares/isAdmin.js";
+import { authLimiter } from "../../middlewares/rateLimiter.js";
 import AdminController from "../../controllers/admin/Admin.controller.js";
 
 
-router.post("/login", AdminController.login);
+// Rate-limit the only unauthenticated admin route before the auth gate below.
+router.post("/login", authLimiter, AdminController.login);
 
 
 router.use(auth, isAdmin);

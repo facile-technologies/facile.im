@@ -3,6 +3,7 @@ import { Button } from "@/components/ui/button";
 import {
   Plus,
   PlusCircle,
+  Pencil,
   Smartphone,
   ExternalLink,
   ChevronDown,
@@ -86,7 +87,7 @@ const profiles = [
   },
 ];
 
-const InventoryList = ({ onCreateNew, setExternalLinkModal }) => {
+const InventoryList = ({ onCreateNew, onEdit, setExternalLinkModal }) => {
   const [selectedProduct, setSelectedProduct] = useState(null);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [paymentStatus, setPaymentStatus] = useState(null);
@@ -128,6 +129,11 @@ const InventoryList = ({ onCreateNew, setExternalLinkModal }) => {
           ctaText: product.cta_text,
           currency: product.currency,
           profiles: product.profiles || [], // Include mapped profiles
+          // Raw values needed to prefill the edit form
+          priceValue: product.price,
+          salePriceValue: product.sale_price,
+          successHeading: product.success_heading,
+          successSubheading: product.success_subheading,
         }));
         setProducts(formattedProducts);
       } else {
@@ -371,9 +377,21 @@ const InventoryList = ({ onCreateNew, setExternalLinkModal }) => {
                     {product.type}
                   </span>
                 </div>
-                <div className="absolute top-14 right-4">
+                <div className="absolute top-14 right-4 flex flex-col gap-2">
+                  {product.type === "Digital Product" && (
+                    <button
+                      onClick={() => onEdit(product)}
+                      title="Edit product"
+                      aria-label="Edit product"
+                      className="bg-white rounded-full p-1.5 shadow-lg transform transition-transform hover:scale-110 active:scale-90 text-black outline-none border-none cursor-pointer"
+                    >
+                      <Pencil className="w-5 h-5" strokeWidth={2} />
+                    </button>
+                  )}
                   <button
                     onClick={() => handleOpenModal(product)}
+                    title="Map to profiles"
+                    aria-label="Map to profiles"
                     className="bg-white rounded-full p-1 shadow-lg transform transition-transform hover:scale-110 active:scale-90 text-black outline-none border-none cursor-pointer"
                   >
                     <PlusCircle

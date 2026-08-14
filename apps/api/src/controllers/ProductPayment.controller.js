@@ -1,6 +1,5 @@
 import Stripe from "stripe";
 import axios from "axios";
-import nodemailer from "nodemailer";
 import { Op, fn, col, literal } from "sequelize";
 import { sequelize } from "../database/connectDB.js";
 import {
@@ -15,19 +14,11 @@ import {
   UserProfile,
 } from "../models/Association.js";
 import { SERVER_URL_NORMALIZED } from "../config/index.js";
+import { sendTemplateEmail } from "../utils/email/index.js";
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 const PLATFORM_FEE_PERCENT = Number(process.env.PLATFORM_FEE_PERCENT || 10);
-
-// ─── Email transporter ────────────────────────────────────────────────────────
-const transporter = nodemailer.createTransport({
-  service: "gmail",
-  auth: {
-    user: process.env.MAIL_USER,
-    pass: process.env.MAIL_PASS,
-  },
-});
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -48,58 +39,40 @@ async function getCountryFromIp(ip) {
   }
 }
 
+/**
+ * Buyer's delivery email, sent from the Stripe webhook.
+ *
+ * Previously this built its own nodemailer transport configured for Gmail while
+ * holding Gandi credentials, so it could not send at all. It now goes through
+ * the shared mailer; the markup lives in utils/email/templates/purchaseDelivery.js.
+ *
+ * This function's only job is mapping the Sequelize row onto template data —
+ * notably absolutizing file URLs, which stays here so the template never has to
+ * know about SERVER_URL.
+ */
 async function sendPurchaseDeliveryEmail(purchase) {
   const product = purchase.product;
   if (!product) return;
 
-  let bodyHtml = "";
+  const files = (product.files || []).map((f) => ({
+    label: f.name,
+    href: f.url.startsWith("http") ? f.url : `${SERVER_URL_NORMALIZED}${f.url}`,
+  }));
 
-  if (product.type === "DIGITAL") {
-    const files = product.files || [];
-    const fileLinks = files
-      .map((f) => {
-        const fileUrl = f.url.startsWith("http")
-          ? f.url
-          : `${SERVER_URL_NORMALIZED}${f.url}`;
-        return `<li style="margin-bottom:8px;"><a href="${fileUrl}" style="color:#5b4ef0;">${f.name}</a></li>`;
-      })
-      .join("");
-
-    bodyHtml = `
-      <h2 style="color:#111;">${product.success_heading || "Thank you for your purchase!"}</h2>
-      <p style="color:#444;">${product.success_subheading || "Hope you enjoy the product!"}</p>
-      ${
-        files.length > 0
-          ? `<p style="color:#111;font-weight:bold;">Your downloads:</p>
-             <ul style="padding-left:20px;">${fileLinks}</ul>`
-          : ""
-      }
-    `;
-  } else {
-    bodyHtml = `
-      <h2 style="color:#111;">${product.success_heading || "Thank you for your purchase!"}</h2>
-      <p style="color:#444;">${product.success_subheading || "Hope you enjoy the product!"}</p>
-      ${
-        product.product_url
-          ? `<p><a href="${product.product_url}" style="color:#5b4ef0;">Access your product here</a></p>`
-          : ""
-      }
-    `;
-  }
-
-  await transporter.sendMail({
-    from: `"Facile" <${process.env.MAIL_USER}>`,
+  await sendTemplateEmail({
     to: purchase.buyer_email,
-    subject: `Your purchase: ${product.title}`,
-    html: `
-      <div style="font-family:Arial,sans-serif;max-width:600px;margin:auto;padding:24px;border:1px solid #eee;border-radius:8px;">
-        ${bodyHtml}
-        <hr style="border:none;border-top:1px solid #eee;margin:24px 0;" />
-        <p style="color:#aaa;font-size:12px;">
-          Delivered via Facile. If you have issues, contact the seller directly.
-        </p>
-      </div>
-    `,
+    template: "purchase-delivery",
+    // Replies reach the seller rather than the noreply mailbox. Falls back to
+    // no replyTo when the seller relation wasn't loaded.
+    replyTo: product.user?.email || undefined,
+    data: {
+      productTitle: product.title,
+      heading: product.success_heading,
+      subheading: product.success_subheading,
+      type: product.type,
+      files,
+      productUrl: product.product_url,
+    },
   });
 }
 
@@ -447,7 +420,12 @@ export const productPurchaseWebhook = async (req, res) => {
           {
             model: Product,
             as: "product",
-            include: [{ model: ProductFile, as: "files" }],
+            include: [
+              { model: ProductFile, as: "files" },
+              // Seller address only — used as replyTo on the delivery email so
+              // buyer replies reach them instead of the noreply mailbox.
+              { model: User, as: "user", attributes: ["email"] },
+            ],
           },
         ],
       });
@@ -455,6 +433,31 @@ export const productPurchaseWebhook = async (req, res) => {
       if (!purchase) {
         // Acknowledge to Stripe even if we can't find the record — avoids retries
         console.error("ProductPurchase not found for session:", session.id);
+        return res.status(200).end();
+      }
+
+      // ── Re-validate the platform fee against the authoritative Stripe amount ──
+      // The stored platform_fee was computed server-side at checkout, but re-derive it
+      // here from the amount Stripe actually charged and reconcile. If they diverge by
+      // more than a 1-cent rounding tolerance, do NOT silently complete — flag for manual
+      // review (leave the purchase PENDING) so a tampered/stale fee can't be paid out.
+      const paidAmountCents =
+        session.amount_total != null
+          ? session.amount_total
+          : Math.round(Number(purchase.amount) * 100);
+      const expectedFeeCents = Math.round((paidAmountCents * PLATFORM_FEE_PERCENT) / 100);
+      const storedFeeCents = Math.round(Number(purchase.platform_fee) * 100);
+
+      if (Math.abs(expectedFeeCents - storedFeeCents) > 1) {
+        // NOTE: the status ENUM only allows PENDING/COMPLETED/FAILED/REFUNDED — there is no
+        // REVIEW/FLAGGED value, so we leave the row PENDING rather than write an invalid enum.
+        console.warn(
+          `[productPurchaseWebhook] platform fee mismatch — leaving purchase un-completed for review. ` +
+            `session: ${session.id}, purchase_id: ${purchase.id}, product: ${meta.product_id}, ` +
+            `stored_fee: ${(storedFeeCents / 100).toFixed(2)}, expected_fee: ${(expectedFeeCents / 100).toFixed(2)}, ` +
+            `paid_amount: ${(paidAmountCents / 100).toFixed(2)}, fee_percent: ${PLATFORM_FEE_PERCENT}`
+        );
+        // Ack to Stripe (200) so it stops retrying; a human/job can reconcile the PENDING row.
         return res.status(200).end();
       }
 

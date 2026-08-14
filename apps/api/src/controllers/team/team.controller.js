@@ -4,7 +4,7 @@ import TeamModel from "../../models/Team.model.js";
 import TeamMemberModel from "../../models/TeamMember.model.js";
 import UserModel from "../../models/User.model.js";
 import UserAnalyticsTotalModel from "../../models/UserAnalyticsTotal.model.js";
-import EmailMethods from "../../utils/email.js";
+import { sendTemplateEmail } from "../../utils/email/index.js";
 import JoiValidation from "../../utils/joiValidation.js";
 import { sequelize } from "../../database/connectDB.js";
 import HttpError from "../../middlewares/errors/HttpError.js";
@@ -239,30 +239,51 @@ addTeamMembers: async (req, res, next) => {
       u.email.toLowerCase()
     );
 
-    // 📧 send invitation emails
-    for (const member of createdMembers) {
-      let inviteLink;
+    // 📧 send invitation emails — settle all sends and report which actually went out.
+    const sendResults = await Promise.allSettled(
+      createdMembers.map((member) => {
+        const isExistingUser = platformUserEmails.includes(member.email);
+        const inviteLink = isExistingUser
+          ? `${FRONTEND_URL}/login?invite=true&member_id=${member.id}`
+          : `${FRONTEND_URL}/signup?member_id=${member.id}`;
 
-      if (platformUserEmails.includes(member.email)) {
-        // already platform user → login link
-        inviteLink = `${FRONTEND_URL}/login?invite=true&member_id=${member.id}`;
+        return sendTemplateEmail({
+          to: member.email,
+          template: "team-invitation",
+          data: {
+            name: member.full_name,
+            inviteLink,
+            teamName: team.team_name,
+            // Drives the copy and the button label: "Accept invitation" for
+            // someone who already has an account, "Accept and create account"
+            // for someone who doesn't — matching where the link actually goes.
+            isExistingUser,
+          },
+        });
+      })
+    );
+
+    const sent = [];
+    const failed = [];
+    sendResults.forEach((result, i) => {
+      const email = createdMembers[i].email;
+      if (result.status === "fulfilled") {
+        sent.push(email);
       } else {
-        // new user → signup with member id
-        inviteLink = `${FRONTEND_URL}/signup?member_id=${member.id}`;
+        console.log(`Team invitation email failed for ${email}:`, result.reason);
+        failed.push(email);
       }
+    });
 
-      EmailMethods.sendEmail(
-        member.email,
-        "Team Invitation",
-        inviteLink,
-        member.full_name
-      );
-    }
+    const message =
+      failed.length === 0
+        ? "Team members added and invitations sent"
+        : `Team members added. Invitations sent to ${sent.length} of ${createdMembers.length}; ${failed.length} failed to send.`;
 
     return res.status(201).json({
       success: true,
-      message: "Team members added and invitations sent",
-      data: createdMembers,
+      message,
+      data: { members: createdMembers, sent, failed },
     });
   } catch (error) {
     console.log("Error adding team members:", error);

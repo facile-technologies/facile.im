@@ -3,8 +3,31 @@ import { Product, ProductFile, ProfileProduct, UserProfile, ProductCustomization
 import fs from "fs";
 import path from "path";
 import HelperMethods from "../utils/helper.js";
+import JoiValidation from "../utils/joiValidation.js";
 
-export const createProduct = async (req, res) => {
+// Validate every user-supplied URL (product_url + LINK entries) before persisting.
+// Only http/https is allowed; rejects javascript:/data:/vbscript: and malformed URLs
+// (anti stored-XSS). Returns a Joi ValidationError to hand to next() → 422, or null.
+// Server-generated /uploads/... file URLs are NOT user input and are never checked here.
+const validateProductUrls = (product_url, files) => {
+  if (product_url) {
+    const { error } = JoiValidation.validateHttpUrl(product_url, "Product URL");
+    if (error) return error;
+  }
+  if (files) {
+    const parsed = Array.isArray(files) ? files : JSON.parse(files);
+    for (const f of parsed) {
+      // Only LINK entries carry user-supplied URLs; allow empty/absent optional URLs.
+      if (f?.type === "LINK" && f.url) {
+        const { error } = JoiValidation.validateHttpUrl(f.url, "Link URL");
+        if (error) return error;
+      }
+    }
+  }
+  return null;
+};
+
+export const createProduct = async (req, res, next) => {
   try {
     const userId = req.user.id;
     const {
@@ -22,6 +45,10 @@ export const createProduct = async (req, res) => {
       files, // Array of { name, type, url, size } for links
       profile_ids, // Array of profile IDs to map to
     } = req.body;
+
+    // Reject unsafe/malformed URLs before creating anything (anti stored-XSS).
+    const urlError = validateProductUrls(product_url, files);
+    if (urlError) return next(urlError);
 
     const productImage = req.files?.productImage?.[0]?.filename
       ? `/uploads/products/${req.files.productImage[0].filename}`
@@ -225,7 +252,7 @@ export const getProductById = async (req, res) => {
   }
 };
 
-export const updateProduct = async (req, res) => {
+export const updateProduct = async (req, res, next) => {
   try {
     const userId = req.user.id;
     const { id } = req.params;
@@ -249,6 +276,10 @@ export const updateProduct = async (req, res) => {
       files,
       fileMetadata,
     } = body;
+
+    // Reject unsafe/malformed URLs before persisting anything (anti stored-XSS).
+    const urlError = validateProductUrls(product_url, files);
+    if (urlError) return next(urlError);
 
     const scalarUpdate = {};
     if (title !== undefined)              scalarUpdate.title = title;

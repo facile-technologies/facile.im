@@ -4,7 +4,6 @@ import TeamModel from "../../models/Team.model.js";
 import TeamMemberModel from "../../models/TeamMember.model.js";
 import UserModel from "../../models/User.model.js";
 import UserAnalyticsTotalModel from "../../models/UserAnalyticsTotal.model.js";
-import EmailMethods from "../../utils/email.js";
 import JoiValidation from "../../utils/joiValidation.js";
 import { sequelize } from "../../database/connectDB.js";
 import HttpError from "../../middlewares/errors/HttpError.js";

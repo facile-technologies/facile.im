@@ -12,9 +12,17 @@ import HttpError from "../../middlewares/errors/HttpError.js";
 import joiValidation from "../../utils/joiValidation.js";
 import generateJwtTokens from "../../utils/generateJwtTokens.js";
 import HelperMethods from "../../utils/helper.js";
-import EmailMethods from "../../utils/email.js";
+import { sendTemplateEmail } from "../../utils/email/index.js";
+import {
+  REFRESH_COOKIE_NAME,
+  hashToken,
+  issueRefreshToken,
+  setRefreshCookie,
+  clearRefreshCookie,
+} from "../../utils/refreshTokens.js";
+import RefreshTokenModel from "../../models/RefreshToken.model.js";
 
-import { APP_NAME, SERVER_URL } from "../../config/index.js";
+import { SERVER_URL } from "../../config/index.js";
 import TeamMemberModel from "../../models/TeamMember.model.js";
 
 class AuthController {
@@ -69,7 +77,10 @@ class AuthController {
       });
 
       if(!teamMember){
-        throw new HttpError(404, "Team member not found");
+        // Do NOT disclose whether this email is a pre-registered team member
+        // (account enumeration). Return a generic validation-style failure that
+        // is identical regardless of team-member existence.
+        throw new HttpError(400, "We couldn't complete your registration. Please check your details and try again.");
       }
 
 
@@ -147,12 +158,21 @@ class AuthController {
         profile_link: result.profile_link, // if you add this field to TempUser
       };
 
-      EmailMethods.sendEmail(
-        result.email,
-        "Email Verification",
-        otp,
-        `${result.first_name || ""} ${result.last_name || ""}`.trim()
-      );
+      try {
+        await sendTemplateEmail({
+          to: result.email,
+          template: "signup-otp",
+          data: {
+            name: `${result.first_name || ""} ${result.last_name || ""}`.trim(),
+            otp,
+          },
+        });
+      } catch (mailErr) {
+        // Essential OTP email failed — roll back the just-created TempUser (+ its OTP)
+        // so the user can retry signup cleanly, then fail the request.
+        await TempUserModel.destroy({ where: { id: result.id } });
+        return next(mailErr);
+      }
 
       return res.status(201).json({
         status: true,
@@ -212,12 +232,16 @@ class AuthController {
         tempUser.otp_expires_at = HelperMethods.addMinutes(now, 15);
         await tempUser.save();
 
-        EmailMethods.sendEmail(
-          tempUser.email,
-          "Email Verification",
-          newOtp,
-          `${tempUser.first_name || ""} ${tempUser.last_name || ""}`.trim()
-        );
+        // Essential OTP email — await so a send failure fails the request
+        // (propagates to the catch -> next(err)) instead of being swallowed.
+        await sendTemplateEmail({
+          to: tempUser.email,
+          template: "signup-otp",
+          data: {
+            name: `${tempUser.first_name || ""} ${tempUser.last_name || ""}`.trim(),
+            otp: newOtp,
+          },
+        });
 
         throw new HttpError(
           403,
@@ -263,16 +287,31 @@ class AuthController {
         await teamMember.save();
       }
       
-      EmailMethods.sendEmail(
-        newUser.email,
-        `Welcome to ${APP_NAME}`,
-        "",
-        `${newUser.first_name || ""} ${newUser.last_name || ""}`.trim()
-      );
+      // Welcome email is non-essential: the account is already verified & created,
+      // so a send failure must NOT fail the request. Await but swallow (log) errors.
+      try {
+        await sendTemplateEmail({
+          to: newUser.email,
+          template: "welcome",
+          data: {
+            name: `${newUser.first_name || ""} ${newUser.last_name || ""}`.trim(),
+            username: newUser.username,
+          },
+        });
+      } catch (mailErr) {
+        console.log("Welcome email failed (non-fatal):", mailErr);
+      }
 
 
             const accessToken = await generateJwtTokens(newUser);
 
+      // Also mint a refresh token (new rotation family) and set it as an
+      // httpOnly cookie so the SPA can silently refresh the short-lived access
+      // token. The access_token response field is unchanged.
+      const { rawToken: refreshToken } = await issueRefreshToken({
+        userId: newUser.id,
+      });
+      setRefreshCookie(res, refreshToken);
 
       return res.status(201).json({
         status: true,
@@ -330,12 +369,15 @@ class AuthController {
       tempUser.last_otp_sent_at = now;
       await tempUser.save();
 
-      EmailMethods.sendEmail(
-        tempUser.email,
-        "Email Verification",
-        otp,
-        `${tempUser.first_name || ""} ${tempUser.last_name || ""}`.trim()
-      );
+      // Essential OTP email — await so a send failure fails the request.
+      await sendTemplateEmail({
+        to: tempUser.email,
+        template: "signup-otp",
+        data: {
+          name: `${tempUser.first_name || ""} ${tempUser.last_name || ""}`.trim(),
+          otp,
+        },
+      });
 
       return res.status(200).json({
         status: true,
@@ -374,6 +416,12 @@ class AuthController {
 
       // token
       const accessToken = await generateJwtTokens(user);
+
+      // Mint + persist a refresh token (new family) and set the httpOnly cookie.
+      const { rawToken: refreshToken } = await issueRefreshToken({
+        userId: user.id,
+      });
+      setRefreshCookie(res, refreshToken);
 
       const userPlain = user.toJSON();
 
@@ -421,6 +469,129 @@ class AuthController {
           access_token: accessToken,
         },
       });
+    } catch (error) {
+      console.log(error);
+      return next(error);
+    }
+  };
+
+  /*  REFRESH  — rotate the refresh token and issue a new access token.
+   *
+   *  Reads the opaque token from the httpOnly `refresh_token` cookie, hashes it,
+   *  and looks up its row. Cases:
+   *    - not found            → 401 (clear cookie)
+   *    - already revoked      → REUSE DETECTED: revoke the whole family + 401
+   *    - expired              → 401 (clear cookie)
+   *    - valid                → ROTATE: revoke the old row, insert a new row in
+   *                             the SAME family, set the new cookie, and return a
+   *                             fresh 15m access token in the dashboard's shape.
+   */
+  static refresh = async (req, res, next) => {
+    try {
+      const rawToken = req.cookies?.[REFRESH_COOKIE_NAME];
+      if (!rawToken) {
+        clearRefreshCookie(res);
+        return res
+          .status(401)
+          .json({ status: false, message: "No refresh token.", data: {} });
+      }
+
+      const tokenHash = hashToken(rawToken);
+      const existing = await RefreshTokenModel.findOne({
+        where: { token_hash: tokenHash },
+      });
+
+      // Unknown token — never issued or already pruned.
+      if (!existing) {
+        clearRefreshCookie(res);
+        return res
+          .status(401)
+          .json({ status: false, message: "Invalid refresh token.", data: {} });
+      }
+
+      // Reuse detection: a revoked token was presented again. A legitimate
+      // client never reuses a rotated token, so treat this as a leak and revoke
+      // the entire family (all descendants), forcing re-login.
+      if (existing.revoked_at) {
+        await RefreshTokenModel.update(
+          { revoked_at: new Date() },
+          { where: { family_id: existing.family_id, revoked_at: null } }
+        );
+        clearRefreshCookie(res);
+        return res.status(401).json({
+          status: false,
+          message: "Refresh token reuse detected.",
+          data: {},
+        });
+      }
+
+      // Expired — drop it and force re-login.
+      if (new Date(existing.expires_at).getTime() <= Date.now()) {
+        existing.revoked_at = new Date();
+        await existing.save();
+        clearRefreshCookie(res);
+        return res
+          .status(401)
+          .json({ status: false, message: "Refresh token expired.", data: {} });
+      }
+
+      const user = await UserModel.findByPk(existing.user_id);
+      if (!user) {
+        clearRefreshCookie(res);
+        return res
+          .status(401)
+          .json({ status: false, message: "User not found.", data: {} });
+      }
+
+      // Rotate: revoke the presented token, mint a successor in the same family.
+      existing.revoked_at = new Date();
+      await existing.save();
+
+      const { rawToken: newRefreshToken } = await issueRefreshToken({
+        userId: user.id,
+        familyId: existing.family_id,
+      });
+      setRefreshCookie(res, newRefreshToken);
+
+      const accessToken = await generateJwtTokens(user);
+
+      return res.status(200).json({
+        status: true,
+        message: "Token refreshed.",
+        data: {
+          access_token: accessToken,
+        },
+      });
+    } catch (error) {
+      console.log(error);
+      return next(error);
+    }
+  };
+
+  /*  LOGOUT  — revoke the presented refresh token (and its family) + clear cookie. */
+  static logout = async (req, res, next) => {
+    try {
+      const rawToken = req.cookies?.[REFRESH_COOKIE_NAME];
+
+      if (rawToken) {
+        const tokenHash = hashToken(rawToken);
+        const existing = await RefreshTokenModel.findOne({
+          where: { token_hash: tokenHash },
+        });
+
+        // Revoke the whole family so no rotated descendant remains usable.
+        if (existing) {
+          await RefreshTokenModel.update(
+            { revoked_at: new Date() },
+            { where: { family_id: existing.family_id, revoked_at: null } }
+          );
+        }
+      }
+
+      clearRefreshCookie(res);
+      return res
+        .status(200)
+        .json({ status: true, message: "Logged out.", data: {} });
     } catch (error) {
       console.log(error);
       return next(error);

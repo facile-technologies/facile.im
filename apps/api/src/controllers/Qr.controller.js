@@ -52,7 +52,7 @@ class QrController {
       }
 
       const username = profileData.username || "";
-      const profileUrl = `https://facile.in/${username}`;
+      const profileUrl = `https://facile.im/${username}`;
 
       // Default design values if not exists
       const design = up.qrDesign || {
@@ -209,7 +209,7 @@ class QrController {
       }
 
       const username = profileData.username || "facile_user";
-      const profileUrl = `https://facile.in/${username}`;
+      const profileUrl = `https://facile.im/${username}`;
 
       const design = up.qrDesign || {
         logo_url: null,

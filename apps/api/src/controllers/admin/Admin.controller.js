@@ -1,5 +1,6 @@
 import joiValidation from "../../utils/joiValidation.js";
 import generateJwtTokens from "../../utils/generateJwtTokens.js";
+import { issueRefreshToken, setRefreshCookie } from "../../utils/refreshTokens.js";
 import CustomErrorHandler from "../../middlewares/errors/customErrorHandler.js";
 import HttpError from "../../middlewares/errors/HttpError.js";
 import UserModel from "../../models/User.model.js"
@@ -50,6 +51,13 @@ class AdminController {
 
       // token
       const accessToken = await generateJwtTokens(user);
+
+      // Mint + persist a refresh token (new family) and set the httpOnly cookie.
+      // Admin shares the same /v1/user/refresh + /v1/user/logout endpoints.
+      const { rawToken: refreshToken } = await issueRefreshToken({
+        userId: user.id,
+      });
+      setRefreshCookie(res, refreshToken);
 
       const userPlain = user.toJSON();
 
@@ -121,6 +129,10 @@ class AdminController {
       const createdCodes = [];
       const MAX_RETRIES_PER_CODE = 10;
 
+      // Cosmetic descriptor base for the printed URL, e.g. "facile-sos-band-black".
+      // Color is already baked into device.title for SKU variants ("SOS Band - Black").
+      const slugBase = HelperMethods.slugify(`${brand || "facile"} ${device.title}`);
+
       while (createdCodes.length < quantity) {
         let created = false;
         let retries = 0;
@@ -132,6 +144,9 @@ class AdminController {
 
           retries++;
           const code = HelperMethods.generateNfcCode(10);
+          // Zero-padded per-batch serial: facile-sos-band-black-0001
+          const serial = String(createdCodes.length + 1).padStart(4, "0");
+          const slug = `${slugBase}-${serial}`;
 
           try {
             await UniqueCode.create({
@@ -143,7 +158,7 @@ class AdminController {
               created_by: req.user.id,
             });
 
-            createdCodes.push(code);
+            createdCodes.push({ code, slug });
             created = true;
           } catch (error) {
             if (error.name === "SequelizeUniqueConstraintError") {

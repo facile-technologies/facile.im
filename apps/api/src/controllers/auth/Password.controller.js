@@ -11,7 +11,7 @@ import HttpError from "../../middlewares/errors/HttpError.js";
 
 import joiValidation from "../../utils/joiValidation.js";
 import HelperMethods from "../../utils/helper.js";
-import EmailMethods from "../../utils/email.js";
+import { sendTemplateEmail } from "../../utils/email/index.js";
 
 import { FORGET_RESET_TOKEN_SECRET } from "../../config/index.js";
 
@@ -28,8 +28,16 @@ class PasswordController {
 
       const user = await UserModel.findOne({ where: { email } });
 
+      // Neutral response returned whether or not the account exists — prevents
+      // account enumeration. Only generate + send an OTP when the user is real.
+      const neutralResponse = {
+        status: true,
+        message: "If an account exists for that email, an OTP has been sent.",
+        data: {},
+      };
+
       if (!user) {
-        return next(CustomErrorHandler.alreadyExist("Account not found"));
+        return res.status(200).json(neutralResponse);
       }
 
       const otp = HelperMethods.generateOTP();
@@ -57,18 +65,17 @@ class PasswordController {
         expires_at: HelperMethods.addMinutes(now, 15),
       });
 
-      EmailMethods.sendEmail(
-        user.email,
-        "Forget Password OTP",
-        otp,
-        `${user.first_name || ""} ${user.last_name || ""}`.trim()
-      );
-
-      return res.status(200).json({
-        status: true,
-        message: "OTP sent, please check your email and verify OTP.",
-        data: { email: user.email },
+      // Essential OTP email — await so a send failure fails the request.
+      await sendTemplateEmail({
+        to: user.email,
+        template: "password-reset-otp",
+        data: {
+          name: `${user.first_name || ""} ${user.last_name || ""}`.trim(),
+          otp,
+        },
       });
+
+      return res.status(200).json(neutralResponse);
     } catch (error) {
       console.log(error);
       return next(error);
@@ -136,12 +143,16 @@ class PasswordController {
           expires_at: HelperMethods.addMinutes(now, 15),
         });
 
-        EmailMethods.sendEmail(
-          user.email,
-          "Forget Password OTP",
-          newOtp,
-          `${user.first_name || ""} ${user.last_name || ""}`.trim()
-        );
+        // Essential OTP email — await so a send failure fails the request
+        // (propagates to the catch -> next(err)).
+        await sendTemplateEmail({
+          to: user.email,
+          template: "password-reset-otp",
+          data: {
+            name: `${user.first_name || ""} ${user.last_name || ""}`.trim(),
+            otp: newOtp,
+          },
+        });
 
         throw new HttpError(
           403,
@@ -188,8 +199,16 @@ class PasswordController {
 
       const user = await UserModel.findOne({ where: { email } });
 
+      // Neutral response returned whether or not the account exists — prevents
+      // account enumeration. Only generate + send an OTP when the user is real.
+      const neutralResponse = {
+        status: true,
+        message: "If an account exists for that email, an OTP has been sent.",
+        data: {},
+      };
+
       if (!user) {
-        return next(CustomErrorHandler.alreadyExist("Account not found"));
+        return res.status(200).json(neutralResponse);
       }
 
       const otp = HelperMethods.generateOTP();
@@ -217,18 +236,17 @@ class PasswordController {
         expires_at: HelperMethods.addMinutes(now, 15),
       });
 
-      EmailMethods.sendEmail(
-        user.email,
-        "Forget Password OTP",
-        otp,
-        `${user.first_name || ""} ${user.last_name || ""}`.trim()
-      );
-
-      return res.status(200).json({
-        status: true,
-        message: "OTP sent, please check your email and verify OTP.",
-        data: { email: user.email },
+      // Essential OTP email — await so a send failure fails the request.
+      await sendTemplateEmail({
+        to: user.email,
+        template: "password-reset-otp",
+        data: {
+          name: `${user.first_name || ""} ${user.last_name || ""}`.trim(),
+          otp,
+        },
       });
+
+      return res.status(200).json(neutralResponse);
     } catch (error) {
       console.log(error);
       return next(error);
@@ -288,12 +306,20 @@ class PasswordController {
         password: hashedPassword,
       });
 
-      EmailMethods.sendEmail(
-        user.email,
-        "Forget Password Reset Successfully",
-        "",
-        `${user.first_name || ""} ${user.last_name || ""}`.trim()
-      );
+      // Confirmation email is non-essential: the password is already changed,
+      // so a send failure must NOT fail the request (that would falsely tell the
+      // user the reset failed). Await but swallow (log) errors.
+      try {
+        await sendTemplateEmail({
+          to: user.email,
+          template: "password-reset-success",
+          data: {
+            name: `${user.first_name || ""} ${user.last_name || ""}`.trim(),
+          },
+        });
+      } catch (mailErr) {
+        console.log("Password-reset confirmation email failed (non-fatal):", mailErr);
+      }
 
       return res.status(200).json({
         status: true,

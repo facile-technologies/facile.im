@@ -6,11 +6,11 @@ import path from "path";
 import geoip from "geoip-lite";
 class HelperMethods {
   static generateOTP() {
-
-
+    // Use a cryptographically strong RNG (crypto.randomInt) instead of Math.random()
+    // so OTPs aren't predictable. Keeps the same output shape: a 6-digit numeric string.
     let otp = ''
     for (let i = 0; i <= 5; i++) {
-      const randVal = Math.round(Math.random() * 9)
+      const randVal = crypto.randomInt(0, 10) // 0-9 inclusive, uniform
       otp = otp + randVal
     }
     return otp;
@@ -45,19 +45,35 @@ class HelperMethods {
     return code;
   }
 
+  // Turn a human label ("SOS Band - Black") into a URL-safe slug segment
+  // ("sos-band-black"). Used to build the cosmetic descriptor in the printed
+  // card URL: facile.im/activate/{code}/{slug}. Never used for lookup/auth.
+  static slugify(text) {
+    return String(text || "")
+      .toLowerCase()
+      .normalize("NFKD")
+      .replace(/\p{Diacritic}/gu, "")     // strip accents
+      .replace(/[^a-z0-9]+/g, "-")        // non-alnum -> hyphen
+      .replace(/^-+|-+$/g, "")            // trim leading/trailing hyphens
+      .replace(/-{2,}/g, "-");            // collapse repeats
+  }
+
   static exportNfcCsv = ({
     codes,
     device,
     status = "GENERATED",
   }) => {
-    // CSV header
-    const csvHeader = "code,device,device_type,status,url\n";
+    // CSV header. `codes` is an array of { code, slug } pairs.
+    const csvHeader = "code,slug,device,device_type,status,url\n";
 
-    const csvRows = codes.map(code => {
-      const url = `${FRONTEND_URL}/${device.id}/${code}`;
+    const csvRows = codes.map(({ code, slug }) => {
+      // The printed card URL is itself the activation entry point. `code` is the
+      // trusted DB key; `slug` is a cosmetic brand-product-color-serial descriptor.
+      const url = `${FRONTEND_URL}/activate/${code}/${slug}`;
 
       return [
         code,
+        slug,
         device.title,
         device.profile_type,
         status,

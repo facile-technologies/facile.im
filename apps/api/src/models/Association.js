@@ -64,10 +64,15 @@ import UserAnalyticsCountryTotal from "./UserAnalyticsCountryTotal.model.js";
 import UserAnalyticsSource from "./UserAnalyticsSource.model.js";
 import CustomLinkAnalytics from "./CustomLinkAnalytics.model.js";
 import PlatformLinkAnalytics from "./PlatformLinkAnalytics.model.js";
+import RefreshToken from "./RefreshToken.model.js";
 
 
 
 export function initAssociations() {
+
+  // User <-> RefreshToken (one user has many refresh-token rows / sessions)
+  User.hasMany(RefreshToken, { foreignKey: "user_id", as: "refreshTokens" });
+  RefreshToken.belongsTo(User, { foreignKey: "user_id", as: "user" });
 
   // User <-> Plan
 
@@ -736,4 +741,5 @@ export {
   StripeConnectAccount,
   ProductPurchase,
   ProductView,
+  RefreshToken,
 };

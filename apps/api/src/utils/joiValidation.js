@@ -140,6 +140,9 @@ class JoiValidation {
     const schema = Joi.object({
       code: Joi.string().length(10).required().label("NFC Code"),
       user_profile_id: Joi.number().integer().min(0).required().label("User Profile ID"),
+      // The activation code (ACTIVATION_CODE Otp) proves possession of the
+      // owner's short-lived activation link and is what binds owner -> profile.
+      activation_code: Joi.string().trim().required().label("Activation Code"),
     });
 
     return schema.validate(body);
@@ -148,6 +151,17 @@ class JoiValidation {
   static unlinkDeviceValidation(body) {
     const schema = Joi.object({
       code: Joi.string().length(10).required().label("NFC Code"),
+    });
+
+    return schema.validate(body);
+  }
+
+  // Self-serve claim: the logged-in user (JWT) binds a scanned card to one of
+  // their own profiles. Owner comes from the token, so no activation_code here.
+  static claimDeviceValidation(body) {
+    const schema = Joi.object({
+      code: Joi.string().length(10).required().label("NFC Code"),
+      user_profile_id: Joi.number().integer().min(0).required().label("User Profile ID"),
     });
 
     return schema.validate(body);
@@ -167,6 +181,16 @@ class JoiValidation {
     return schema.validate(body);
   }
 
+
+  // Validate a single user-supplied URL. Constrains the scheme to http/https so
+  // dangerous schemes (javascript:, data:, vbscript:) and malformed URLs are rejected —
+  // prevents stored XSS when these URLs are later rendered as links.
+  static validateHttpUrl(url, label = "URL") {
+    const schema = Joi.string()
+      .uri({ scheme: ["http", "https"] })
+      .label(label);
+    return schema.validate(url);
+  }
 
    static createTemplateValidation(body) {
     const schema = Joi.object({

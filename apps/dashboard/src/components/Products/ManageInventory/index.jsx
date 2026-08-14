@@ -27,10 +27,13 @@ import { ExternalLinkModal } from "./ExternalLinkModal";
 import InventoryList from "./InventoryList";
 import { ProductPreview } from "./ProductPreview";
 import AddExternalProduct from "./AddExternalProduct";
-import { createProduct } from "@/services/products";
+import { createProduct, updateProduct } from "@/services/products";
+import { showToast } from "@/store/utils/toast";
 
 export default function ManageInventory() {
-  const { register, handleSubmit, setValue } = useForm();
+  const { register, handleSubmit, setValue, reset, watch } = useForm();
+  const [editingProduct, setEditingProduct] = useState(null);
+  const [submitting, setSubmitting] = useState(false);
   const [externalScreen, setExternalScreen] = useState(false);
   const [fileModal, setFileModal] = useState(false);
   const [linkModal, setLinkModal] = useState(false);
@@ -42,55 +45,127 @@ export default function ManageInventory() {
   const [imageFile, setImageFile] = useState(null);
 
   const [externalUrl, setExternalUrl] = useState("");
+
+  const FORM_DEFAULTS = {
+    title: "",
+    description: "",
+    price: "",
+    currency: "",
+    cta: "Buy Now",
+    successHeading: "Thank you for your purchase",
+    successSubheading: "Hope you enjoy the product!",
+  };
+
+  // Return to the list view and clear any in-progress form state.
+  const backToList = () => {
+    setEditingProduct(null);
+    setProductFiles([]);
+    setProductLinks([]);
+    setImageFile(null);
+    setPreviewImage(null);
+    reset(FORM_DEFAULTS);
+    setView("list");
+  };
+
+  // Open a blank form to create a new digital product.
+  const startAdd = () => {
+    setEditingProduct(null);
+    reset(FORM_DEFAULTS);
+    setView("add");
+  };
+
+  // Open the form prefilled with an existing product's details for editing.
+  const startEdit = (product) => {
+    setEditingProduct(product);
+    reset({
+      title: product.title || "",
+      description: product.description || "",
+      price: product.priceValue ?? "",
+      currency: product.currency || "",
+      cta: product.ctaText || "Buy Now",
+      successHeading: product.successHeading || "",
+      successSubheading: product.successSubheading || "",
+    });
+    setView("add");
+  };
+
   const onSubmit = async (data) => {
     try {
-      const formData = new FormData();
+      setSubmitting(true);
 
-      // REQUIRED
-      formData.append("type", "DIGITAL");
-      formData.append("title", data.title);
+      if (editingProduct) {
+        // Edit mode — update scalar fields as JSON (PATCH /v1/products/:id).
+        // File / link editing is not handled here yet.
+        const payload = {
+          title: data.title,
+          description: data.description ?? "",
+          price: data.price ?? "",
+          currency: data.currency ?? "",
+          cta_text: data.cta ?? "",
+          success_heading: data.successHeading ?? "",
+          success_subheading: data.successSubheading ?? "",
+        };
+        const res = await updateProduct(editingProduct.id, payload);
+        if (res?.STATUS && res.STATUS !== "SUCCESS") {
+          showToast("error", res.MESSAGE || "Failed to update product");
+          return;
+        }
+        showToast("success", "Product updated");
+      } else {
+        const formData = new FormData();
 
-      // OPTIONAL
-      if (data.description) formData.append("description", data.description);
-      if (data.price) formData.append("price", data.price);
-      if (data.currency) formData.append("currency", data.currency);
+        // REQUIRED
+        formData.append("type", "DIGITAL");
+        formData.append("title", data.title);
 
-      if (data.cta) formData.append("cta_text", data.cta);
+        // OPTIONAL
+        if (data.description) formData.append("description", data.description);
+        if (data.price) formData.append("price", data.price);
+        if (data.currency) formData.append("currency", data.currency);
+        if (data.cta) formData.append("cta_text", data.cta);
+        if (data.successHeading)
+          formData.append("success_heading", data.successHeading);
+        if (data.successSubheading)
+          formData.append("success_subheading", data.successSubheading);
 
-      if (data.successHeading)
-        formData.append("success_heading", data.successHeading);
+        // FILE MODE
+        productFiles.forEach((file) => {
+          formData.append("productFile", file);
+        });
 
-      if (data.successSubheading)
-        formData.append("success_subheading", data.successSubheading);
+        // LINK MODE
+        if (productLinks.length > 0) {
+          formData.append("files", JSON.stringify(productLinks));
+        }
 
-      // FILE MODE
-      productFiles.forEach((file) => {
-        formData.append("productFile", file);
-      });
+        // IMAGES
+        if (imageFile) {
+          formData.append("productImage", imageFile);
+        }
 
-      // LINK MODE
-      if (productLinks.length > 0) {
-        formData.append("files", JSON.stringify(productLinks));
+        await createProduct(formData);
+        showToast("success", "Product created");
       }
 
-      // IMAGES
-
-      if (imageFile) {
-        formData.append("productImage", imageFile); // ✅ correct
-      }
-
-      await createProduct(formData);
-
-      setView("list");
+      backToList();
     } catch (err) {
       console.error(err);
+      showToast(
+        "error",
+        err.response?.data?.MESSAGE ||
+          err.response?.data?.message ||
+          "Something went wrong",
+      );
+    } finally {
+      setSubmitting(false);
     }
   };
   if (view === "list") {
     return (
       <div className="min-h-screen bg-[#262626] p-4 lg:p-10 text-white rounded-[10px]">
         <InventoryList
-          onCreateNew={() => setView("add")}
+          onCreateNew={startAdd}
+          onEdit={startEdit}
           setExternalLinkModal={setExternalLinkModal}
         />
       </div>
@@ -106,9 +181,21 @@ export default function ManageInventory() {
           onSubmit={handleSubmit(onSubmit)}
           className="min-h-screen bg-white dark:bg-[#303030] p-6 text-black dark:text-white rounded-[10px] space-y-6 border border-[#C0C0C017] w-full"
         >
-          <h2 className="text-2xl font-semibold">Add your Digital Product</h2>
+          <h2 className="text-2xl font-semibold">
+            {editingProduct
+              ? "Edit your Digital Product"
+              : "Add your Digital Product"}
+          </h2>
+
+          {editingProduct && (
+            <div className="p-4 border border-[#C0C0C017] rounded-2xl text-xs text-[#FFFFFFD9]">
+              File &amp; link editing isn't available yet — update the product
+              details below and save.
+            </div>
+          )}
 
           {/* FILE / LINK */}
+          {!editingProduct && (
           <div className="flex justify-between p-4 border border-[#C0C0C017] rounded-2xl">
             <div>
               <h3 className="text-sm text-white font-medium">
@@ -149,6 +236,7 @@ export default function ManageInventory() {
               </DropdownMenuContent>
             </DropdownMenu>
           </div>
+          )}
 
           {/* TITLE */}
           <div className="p-4 border border-[#C0C0C017] rounded-2xl">
@@ -226,7 +314,10 @@ export default function ManageInventory() {
               </Tabs>
             </div>
 
-            <Select onValueChange={(val) => setValue("currency", val)}>
+            <Select
+              value={watch("currency") || ""}
+              onValueChange={(val) => setValue("currency", val)}
+            >
               <SelectTrigger className="bg-[#373636]! border-none w-full! text-[#FFFFFFCC]! h-[50px]! rounded-[10px]!">
                 <SelectValue placeholder="Currency" />
               </SelectTrigger>
@@ -284,12 +375,25 @@ export default function ManageInventory() {
           </div>
 
           {/* SUBMIT */}
-          <div className="flex justify-end">
+          <div className="flex justify-end gap-3">
+            <Button
+              type="button"
+              onClick={backToList}
+              disabled={submitting}
+              className="bg-transparent! border border-[#C0C0C040]! text-white! px-6! rounded-full! text-base! h-[41px]! "
+            >
+              Cancel
+            </Button>
             <Button
               type="submit"
-              className="bg-black! text-white! px-6! rounded-full! text-base! w-[124px]! h-[41px]! "
+              disabled={submitting}
+              className="bg-black! text-white! px-6! rounded-full! text-base! min-w-[124px]! h-[41px]! "
             >
-              Update
+              {submitting
+                ? "Saving..."
+                : editingProduct
+                  ? "Save changes"
+                  : "Publish product"}
             </Button>
           </div>
         </form>

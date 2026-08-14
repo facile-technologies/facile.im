@@ -7,6 +7,87 @@ import DeviceService from "../constants/devices.js";
 import { SERVER_URL_NORMALIZED } from "../config/index.js";
 
 class DeviceController {
+  // Shared validation + bind used by BOTH activation entry points:
+  //  - activateDevice (anonymous, owner proven by an ACTIVATION_CODE Otp)
+  //  - claimDevice    (authenticated self-serve, owner = the logged-in user)
+  // `ownerUserId` is the identity the chosen profile is authorized against;
+  // `performedBy` is recorded in updated_by. Throws HttpError on any failure so
+  // callers' existing try/catch -> next(error) handles it uniformly.
+  static _bindCodeToProfile = async ({ code, user_profile_id, ownerUserId, performedBy }) => {
+    // 1. Find the NFC code
+    const nfc = await UniqueCode.findOne({ where: { code } });
+    if (!nfc) {
+      throw new HttpError(404, "Product code is invalid");
+    }
+
+    // 2. Already mapped
+    if (nfc.user_profile_id || nfc.user_id) {
+      throw new HttpError(409, "This product has been already activated with another profile.");
+    }
+
+    // 3. Deactivated
+    if (nfc.status === "DEACTIVATED") {
+      throw new HttpError(403, "This product is deactivated and cannot be used");
+    }
+
+    // 4. Find profile
+    const profile = await UserProfile.findOne({
+      where: { id: user_profile_id },
+      include: [{ model: ProfileType, attributes: ["type"] }],
+    });
+    if (!profile) {
+      throw new HttpError(404, "Profile not found");
+    }
+
+    // 4b. SECURITY (Row 9 / IDOR): the chosen profile must be one the owner is
+    // entitled to activate — the owner themselves, plus (if a team owner) their
+    // accepted team members. Authorize against that set, never a raw body value.
+    const owner = await User.findByPk(ownerUserId, { attributes: ["id", "is_team_owner"] });
+    let allowedUserIds = [ownerUserId];
+    if (owner?.is_team_owner) {
+      const team = await Team.findOne({ where: { user_id: ownerUserId } });
+      if (team) {
+        const members = await TeamMember.findAll({
+          where: {
+            team_id: team.id,
+            invitation_status: "ACCEPTED",
+            user_id: { [Op.ne]: null },
+          },
+          attributes: ["user_id"],
+        });
+        allowedUserIds = [...allowedUserIds, ...members.map((m) => m.user_id)];
+      }
+    }
+    if (!allowedUserIds.includes(profile.user_id)) {
+      throw new HttpError(403, "This profile is not available to activate");
+    }
+
+    // 5. Type compatibility
+    const devices = DeviceService.getDevices();
+    const deviceConfig = devices.find((d) => d.id === nfc.device_type);
+    if (!deviceConfig) {
+      throw new HttpError(500, "Device configuration error");
+    }
+    const profileTypeName = profile.ProfileType?.type;
+    if (profileTypeName !== deviceConfig.profile_type) {
+      throw new HttpError(
+        400,
+        `Incompatible profile type. This product requires a ${deviceConfig.profile_type} profile.`
+      );
+    }
+
+    // 6. Bind the card to the profile's ACTUAL owner (for a team owner activating
+    // a member's profile, that's the member). `updated_by` records who did it.
+    nfc.user_id = profile.user_id;
+    nfc.user_profile_id = user_profile_id;
+    nfc.status = "ACTIVATED";
+    nfc.activation_date = new Date();
+    nfc.updated_by = performedBy;
+    await nfc.save();
+
+    return { nfc, profileTypeName };
+  };
+
   static activateDevice = async (req, res, next) => {
     try {
       const { error } = joiValidation.activateDeviceValidation(req.body);
@@ -15,83 +96,52 @@ class DeviceController {
         return next(error);
       }
 
-      const { code, user_profile_id } = req.body;
+      const { code, user_profile_id, activation_code } = req.body;
 
-      // 1. Find the NFC code
-      const nfc = await UniqueCode.findOne({ where: { code } });
-
-      if (!nfc) {
-        return next(new HttpError(404, "Product code is invalid"));
-      }
-
-      // 2. Security Check: Already Mapped
-      if (nfc.user_profile_id || nfc.user_id) {
-        return next(new HttpError(409, "This product has been already activated with another profile."));
-      }
-
-      // 3. Security Check: Deactivated status
-      if (nfc.status === "DEACTIVATED") {
-        return next(new HttpError(403, "This product is deactivated and cannot be used"));
-      }
-
-      // 4. Find Profile and derive userId from it
-      const profile = await UserProfile.findOne({
-        where: { id: user_profile_id },
-        include: [
-          {
-            model: ProfileType,
-            attributes: ["type"],
-          },
-        ],
+      // 0. SECURITY (Row 9 / IDOR): the owner MUST be derived from the
+      // activation code, never from the posted profile. The activation flow is
+      // deliberately anonymous (the phone need not be logged in), so possession
+      // of a valid, unused, non-expired ACTIVATION_CODE Otp is what proves the
+      // caller is acting on behalf of that owner. Same lookup shape as
+      // getProfilesByCode.
+      const otpRecord = await Otp.findOne({
+        where: {
+          otp: activation_code,
+          otp_type: "ACTIVATION_CODE",
+          is_used: false,
+        },
       });
 
-      if (!profile) {
-        return next(new HttpError(404, "Profile not found"));
+      if (!otpRecord) {
+        return next(new HttpError(403, "Invalid or already used activation code"));
       }
 
-      const userId = profile.user_id;
-
-      // 5. Type Compatibility Check
-      const devices = DeviceService.getDevices();
-      const deviceConfig = devices.find((d) => d.id === nfc.device_type);
-
-      if (!deviceConfig) {
-        return next(new HttpError(500, "Device configuration error"));
+      if (otpRecord.status === "COMPLETED") {
+        return next(new HttpError(403, "This activation code has already been used"));
       }
 
-      const profileTypeName = profile.ProfileType?.type;
-
-      if (profileTypeName !== deviceConfig.profile_type) {
-        return next(
-          new HttpError(
-            400,
-            `Incompatible profile type. This product requires a ${deviceConfig.profile_type} profile.`
-          )
-        );
+      if (new Date() > new Date(otpRecord.expires_at)) {
+        return next(new HttpError(403, "Activation code has expired"));
       }
 
-      // 6. Activation
-      nfc.user_id = userId;
-      nfc.user_profile_id = user_profile_id;
-      nfc.status = "ACTIVATED";
-      nfc.activation_date = new Date();
-      nfc.updated_by = userId;
+      // Owner identity travels in the activation code, NOT in the request body.
+      const userId = otpRecord.user_id;
 
-      await nfc.save();
+      // Steps 1–6 (find code, security checks, ownership, type-compat, bind) are
+      // shared with the authenticated claim flow. Owner = the code owner.
+      const { nfc, profileTypeName } = await DeviceController._bindCodeToProfile({
+        code,
+        user_profile_id,
+        ownerUserId: userId,
+        performedBy: userId,
+      });
 
-      // STATUS UPDATE: Mark activation code as COMPLETED
+      // STATUS UPDATE: Mark the specific activation code used for this bind as
+      // COMPLETED so it can't be replayed and so the desktop poller advances.
       try {
-        await Otp.update(
-          { status: "COMPLETED", is_used: true },
-          {
-            where: {
-              user_id: userId,
-              otp_type: "ACTIVATION_CODE",
-              status: "SCANNED",
-              is_used: false,
-            },
-          }
-        );
+        otpRecord.status = "COMPLETED";
+        otpRecord.is_used = true;
+        await otpRecord.save();
       } catch (otpError) {
         console.error("Failed to update OTP status after activation:", otpError);
       }
@@ -424,7 +474,10 @@ class DeviceController {
           },
           {
             model: User,
-            attributes: ["id", "full_name", "email", "avatar_url"],
+            // Row 16: minimize disclosure on this public endpoint. The picker
+            // only renders a display name + avatar, so we do NOT select email
+            // or any other owner PII.
+            attributes: ["id", "full_name", "avatar_url"],
           },
         ],
         order: [["id", "DESC"]],
@@ -474,7 +527,6 @@ class DeviceController {
         user: {
           id: p.User?.id,
           full_name: p.User?.full_name,
-          email: p.User?.email,
           avatar: p.User?.avatar_url
             ? p.User.avatar_url.startsWith("http")
               ? p.User.avatar_url
@@ -512,16 +564,88 @@ class DeviceController {
         return next(new HttpError(404, "Activation code not found"));
       }
 
-      let currentStatus = otpRecord.status;
-
-      // Check for expiration dynamically
-      if (!otpRecord.is_used && new Date() > new Date(otpRecord.expires_at)) {
-        currentStatus = "EXPIRED";
-      }
+      // Row 16: minimize disclosure on this public endpoint. Only reveal the
+      // live status of a still-relevant (non-expired) activation OTP. Any
+      // expired / historic / superseded code collapses to "EXPIRED", so the
+      // endpoint can't be used to mine the real state (PENDING/SCANNED/
+      // COMPLETED) of arbitrary old codes via enumeration. The legit desktop
+      // poller only reads a freshly generated code within its 15-min window,
+      // so it still observes PENDING -> SCANNED -> COMPLETED normally.
+      const isExpired = new Date() > new Date(otpRecord.expires_at);
+      const currentStatus = isExpired ? "EXPIRED" : otpRecord.status;
 
       return res.status(200).json({
         success: true,
         status: currentStatus,
+      });
+    } catch (error) {
+      console.log(error);
+      return next(error);
+    }
+  };
+
+  // PUBLIC. Resolve a scanned card code so the self-serve setup page can branch:
+  // ACTIVATED -> send the visitor to the live profile; anything else -> onboarding.
+  // Uses `code` (the trusted DB key); the URL slug is cosmetic and never consulted.
+  static scanCode = async (req, res, next) => {
+    try {
+      const { code } = req.params;
+      if (!code) {
+        return next(new HttpError(400, "Code is required"));
+      }
+
+      const nfc = await UniqueCode.findOne({ where: { code } });
+      if (!nfc) {
+        return next(new HttpError(404, "Product code not found"));
+      }
+
+      const deviceConfig = DeviceService.getDevices().find((d) => d.id === nfc.device_type);
+      const profileType = deviceConfig?.profile_type ?? null;
+      const activated = nfc.status === "ACTIVATED" && !!nfc.user_profile_id;
+
+      return res.status(200).json({
+        success: true,
+        activated,
+        status: nfc.status,
+        device_type: nfc.device_type,
+        device_name: nfc.device_name || deviceConfig?.title || "Facile Device",
+        profile_type: profileType,
+      });
+    } catch (error) {
+      console.log(error);
+      return next(error);
+    }
+  };
+
+  // AUTHENTICATED self-serve bind. The logged-in user (JWT -> req.userId) links a
+  // scanned card to one of their own profiles. Owner is the token, so no OTP is
+  // needed — this is the tail of the scan-to-onboard flow. Reuses the same
+  // validation as activateDevice via the shared _bindCodeToProfile helper.
+  static claimDevice = async (req, res, next) => {
+    try {
+      const { error } = joiValidation.claimDeviceValidation(req.body);
+      if (error) {
+        return next(error);
+      }
+
+      const { code, user_profile_id } = req.body;
+      const userId = req.userId;
+
+      const { nfc, profileTypeName } = await DeviceController._bindCodeToProfile({
+        code,
+        user_profile_id,
+        ownerUserId: userId,
+        performedBy: userId,
+      });
+
+      return res.status(200).json({
+        success: true,
+        message: "Product activated successfully",
+        data: {
+          code: nfc.code,
+          device_name: nfc.device_name,
+          profile_type: profileTypeName,
+        },
       });
     } catch (error) {
       console.log(error);

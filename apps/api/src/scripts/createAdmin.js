@@ -2,8 +2,14 @@ import bcrypt from "bcrypt";
 import User from "../models/User.model.js";
 import { sequelize } from "../database/connectDB.js";
 
-const ADMIN_EMAIL = "admin@facile.com";
-const ADMIN_PASSWORD = "Admin@123"; 
+// Overridable via env so the same script seeds any environment:
+//   ADMIN_EMAIL=admin1@facile.com ADMIN_PASSWORD=Admin@123 ADMIN_USERNAME=admin1 \
+//     NODE_ENV=dev node src/scripts/createAdmin.js
+const ADMIN_EMAIL = process.env.ADMIN_EMAIL || "admin@facile.com";
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "Admin@123";
+const ADMIN_USERNAME = process.env.ADMIN_USERNAME || "admin";
+const ADMIN_FIRST_NAME = process.env.ADMIN_FIRST_NAME || "System";
+const ADMIN_LAST_NAME = process.env.ADMIN_LAST_NAME || "Admin";
 async function createAdmin() {
   try {
     // ensure DB connection
@@ -25,16 +31,16 @@ async function createAdmin() {
 
     // create admin user
     await User.create({
-      full_name: "System Admin",
-      first_name: "System",
-      last_name: "Admin",
-      username: "admin",
+      full_name: `${ADMIN_FIRST_NAME} ${ADMIN_LAST_NAME}`.trim(),
+      first_name: ADMIN_FIRST_NAME,
+      last_name: ADMIN_LAST_NAME,
+      username: ADMIN_USERNAME,
       email: ADMIN_EMAIL,
       password: hashedPassword,
       role: "ADMIN",
       profile_type: "PERSONAL",
       provider: "LOCAL",
-      is_verified: true,
+      is_verfied: true, // NB: column is misspelled "is_verfied" in the model
     });
 
     console.log("🎉 Admin user created successfully");

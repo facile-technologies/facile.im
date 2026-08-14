@@ -65,7 +65,9 @@ export const createProduct = async (formData) => {
  */
 export const updateProduct = async (productId, productData) => {
   try {
-    const response = await api.put(`/v1/products/${productId}`, productData, {
+    // Backend mounts this as PATCH /v1/products/:id (product.routes.js:32).
+    // A PUT would 404 — keep this in sync with the route method.
+    const response = await api.patch(`/v1/products/${productId}`, productData, {
       headers: { "Content-Type": "application/json" },
     });
     return response.data;
